@@ -3,6 +3,17 @@
 #include <vector>
 #include "Config.h"
 #include "Utils.h"
+
+#if __has_include("Secrets.h")
+#include "Secrets.h"
+#define HAS_SECRETS 1
+#elif __has_include("Secrets.local.h")
+#include "Secrets.local.h"
+#define HAS_SECRETS 1
+#else
+#define HAS_SECRETS 0
+#endif
+
 #include "DeviceManager.h"
 #include "WifiManager.h"
 #include "MedicalRecordSensor.h"
@@ -950,6 +961,10 @@ void handleSerialCommands() {
         Serial.println("keyboard - Test keyboard virtual");
         Serial.println("mode   - Pilih mode pengukuran");
         Serial.println("test   - Test koneksi Ubidots");
+        Serial.println("testcloud - Test koneksi multi-cloud");
+        Serial.println("cloudstatus - Lihat status CloudBroker");
+        Serial.println("addcloud - Tambah user multi-cloud");
+        Serial.println("simdata - Kirim data dummy ke cloud");
         Serial.println("eda    - Test pembacaan sensor EDA");
         Serial.println("hr     - Test sensor Heart Rate & SpO2");
         Serial.println("temp   - Test sensor suhu MLX90614");
@@ -1873,6 +1888,42 @@ void handleSerialCommands() {
         Serial.println("Ubidots: " + cloudBroker.getUbidotsStatus());
         Serial.println("ThingsBoard: " + cloudBroker.getThingsBoardStatus());
     }
+    else if (cmd == "simdata") {
+        Serial.println("\n=== SIMULASI DATA CLOUD ===");
+        if (!cloudBroker.isReady()) {
+            Serial.println("✗ CloudBroker not ready");
+            return;
+        }
+
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("✗ WiFi tidak terhubung");
+            return;
+        }
+
+        SensorData data;
+        data.addValue(UBIDOTS_VARIABLE_LABEL, 1234);
+        data.addValue(UBIDOTS_HR_VARIABLE, 72);
+        data.addValue(UBIDOTS_SPO2_VARIABLE, 98);
+        data.addValue(UBIDOTS_TEMP_VARIABLE, 36.7f);
+        data.addValue(UBIDOTS_BP_SYSTOLIC_VARIABLE, 120);
+        data.addValue(UBIDOTS_BP_DIASTOLIC_VARIABLE, 80);
+        data.addValue(UBIDOTS_BP_HR_VARIABLE, 72);
+        data.addValue("ecg_heart_rate", 70);
+        data.addValue(UBIDOTS_POSITION_VARIABLE, 3);
+        data.addValue(UBIDOTS_SNORE_VARIABLE, 15);
+        data.addValue(UBIDOTS_EMG_VARIABLE, 155.5f);
+
+        Serial.println("Mengirim data dummy ke cloud...");
+        auto results = cloudBroker.sendData(data);
+
+        for (const auto& result : results) {
+            if (result.status == CLOUD_SUCCESS) {
+                Serial.println("✓ " + result.providerName + " OK");
+            } else {
+                Serial.println("✗ " + result.providerName + " FAILED: " + result.message);
+            }
+        }
+    }
     else if (cmd == "addcloud") {
         Serial.println("\n=== TAMBAH USER DENGAN MULTI-CLOUD ===");
         Serial.println("(Kosongkan untuk batal)");
@@ -2030,11 +2081,27 @@ void setup() {
     Serial.println("\nInitializing device manager...");
     deviceMgr.begin();
     
+    // Auto-add device from Secrets.h if no users exist
+    if (deviceMgr.isEmpty() && HAS_SECRETS) {
+        if (String(UBIDOTS_TOKEN_SECRET).length() > 0 || String(THINGSBOARD_TOKEN_SECRET).length() > 0) {
+            deviceMgr.addDeviceWithCloud(
+                "Default",
+                String(UBIDOTS_TOKEN_SECRET),
+                String(UBIDOTS_DEVICE_LABEL_SECRET),
+                String(THINGSBOARD_TOKEN_SECRET),
+                String(THINGSBOARD_DEVICE_LABEL_SECRET),
+                CLOUD_PROVIDER_SECRET
+            );
+            selectedIndex = 0;
+            Serial.println("[Secrets] Default device added from Secrets.h");
+        }
+    }
+
     // Initialize CloudBroker after deviceMgr is ready
     if (!deviceMgr.isEmpty()) {
         Device& currentDevice = deviceMgr.devices[selectedIndex];
         CloudProviderType providerType = (CloudProviderType)currentDevice.cloudProvider;
-        
+
         cloudBroker.begin(
             providerType,
             currentDevice.ubidotsToken,
@@ -2042,12 +2109,12 @@ void setup() {
             currentDevice.thingsboardToken,
             currentDevice.thingsboardDeviceLabel
         );
-        
+
         Serial.println("[CloudBroker] Initialized successfully");
     } else {
         Serial.println("[CloudBroker] No users configured, skipping initialization");
     }
-    
+
     Serial.println("Initializing WiFi manager...");
     wifiMgr.begin();
     
