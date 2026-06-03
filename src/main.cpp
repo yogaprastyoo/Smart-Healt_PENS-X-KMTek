@@ -11,6 +11,7 @@
 #include "DisplayManager.h"
 #include "BodyPositionSnoreSensor.h"
 #include "EMGSensor.h"
+#include "CloudBroker.h"
 
 // --- Objects ---
 DeviceManager deviceMgr;
@@ -21,6 +22,7 @@ BloodPressureSensor bpSensor;
 DisplayManager display;
 BodyPositionSnoreSensor bodyPositionSnoreSensor;
 EMGSensor emgSensor;
+CloudBroker cloudBroker;
 
 String tempUserName;
 String tempUserToken;
@@ -88,13 +90,11 @@ static const unsigned long AUTO_SLEEP_TIMEOUT = 300000; // 5 menit
 
 // --- Deklarasi Fungsi ---
 void sendToUbidots(int edaValue, const String &token, const String &deviceLabel);
-void sendMedicalRecordToUbidots(int edaValue, int heartRate, int spo2, float objectTemp, const String &token, const String &deviceLabel);
-void sendECGToUbidots(int ecgHeartRate, const String &token, const String &deviceLabel);
-void sendBloodPressureToUbidots(int systolic, int diastolic, int heartRate,
-                               const String &token, const String &deviceLabel);
-void sendBodyPositionSnoreToUbidots(int position, int snoreAmplitude,
-                                   const String &token, const String &deviceLabel);
-void sendEMGToUbidots(float emgAmplitude_mV, const String &token, const String &deviceLabel);
+void sendMedicalRecordToCloud(int edaValue, int heartRate, int spo2, float objectTemp);
+void sendECGToCloud(int ecgHeartRate);
+void sendBloodPressureToCloud(int systolic, int diastolic, int heartRate);
+void sendBodyPositionSnoreToCloud(int position, int snoreAmplitude);
+void sendEMGToCloud(float emgAmplitude_mV);
 void goToHomeScreen();
 void goToMeasurementScreen();
 void showCurrentUser();
@@ -169,254 +169,225 @@ void sendToUbidots(int edaValue, const String &token, const String &deviceLabel)
     }
 }
 
-void sendMedicalRecordToUbidots(int edaValue, int heartRate, int spo2, 
-                                float objectTemp,
-                                const String &token, const String &deviceLabel) {
-    int validDataCount = 0;
+void sendMedicalRecordToCloud(int edaValue, int heartRate, int spo2, float objectTemp) {
+    if (!cloudBroker.isReady()) {
+        Serial.println("[Cloud] CloudBroker not ready");
+        display.updateStatus("Cloud not configured");
+        return;
+    }
     
+    int validDataCount = 0;
     if (edaValue > 0) validDataCount++;
     if (heartRate > 30 && heartRate < 250) validDataCount++;
     if (spo2 > 70 && spo2 <= 100) validDataCount++;
     if (objectTemp > 25.0 && objectTemp < 45.0) validDataCount++;
     
     if (validDataCount < 2) {
-        Serial.println("Medical Record: Data tidak lengkap atau tidak valid, tidak dikirim");
+        Serial.println("[Cloud] Medical Record: Data tidak lengkap, tidak dikirim");
         return;
     }
     
-    if (WiFi.status() != WL_CONNECTED) {
-        display.updateStatus("WiFi Putus! Data tidak dikirim.");
-        return;
+    if (millis() - lastUbidotsMillis < UBIDOTS_MIN_INTERVAL_MS) {
+        return; // Rate limited
     }
     
-    if (millis() - lastUbidotsMillis > UBIDOTS_MIN_INTERVAL_MS) {
-        String stressLevel = medSensor.getStressLevel(edaValue);
-        display.updateMedicalRecordData(edaValue, stressLevel, heartRate, spo2, 
-                                      objectTemp, true);
-
-        HTTPClient http;
-        String url = "https://" + String(UBIDOTS_SERVER) + "/api/v1.6/devices/" + deviceLabel;
-        
-        http.begin(url);
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("X-Auth-Token", token);
-        
-        String payload = "{";
-        bool first = true;
-        
-        if (edaValue > 0) {
-            payload += "\"" + String(UBIDOTS_VARIABLE_LABEL) + "\": " + String(edaValue);
-            first = false;
-        }
-        
-        if (heartRate > 30 && heartRate < 250) {
-            if (!first) payload += ",";
-            payload += "\"" + String(UBIDOTS_HR_VARIABLE) + "\": " + String(heartRate);
-            first = false;
-        }
-        
-        if (spo2 > 70 && spo2 <= 100) {
-            if (!first) payload += ",";
-            payload += "\"" + String(UBIDOTS_SPO2_VARIABLE) + "\": " + String(spo2);
-            first = false;
-        }
-        
-        if (objectTemp > 25.0 && objectTemp < 45.0) {
-            if (!first) payload += ",";
-            payload += "\"" + String(UBIDOTS_TEMP_VARIABLE) + "\": " + String(objectTemp, 2);
-            first = false;
-        }
-        
-        payload += "}";
-        
-        if (!first) {
-            int code = http.POST(payload);
-            
-            if (code == 200 || code == 201) {
-                display.updateStatus("Medical Record uploaded (Code: " + String(code) + ")");
-                Serial.println("Data Medical Record berhasil dikirim ke Ubidots");
-            } else {
-                display.updateStatus("Upload Medical Record Gagal! Code: " + String(code));
-                Serial.printf("Error mengirim Medical Record ke Ubidots: %d\n", code);
-            }
-            
-            http.end();
-            lastUbidotsMillis = millis();
+    String stressLevel = medSensor.getStressLevel(edaValue);
+    display.updateMedicalRecordData(edaValue, stressLevel, heartRate, spo2, objectTemp, true);
+    
+    SensorData data;
+    if (edaValue > 0) data.addValue(UBIDOTS_VARIABLE_LABEL, edaValue);
+    if (heartRate > 30 && heartRate < 250) data.addValue(UBIDOTS_HR_VARIABLE, heartRate);
+    if (spo2 > 70 && spo2 <= 100) data.addValue(UBIDOTS_SPO2_VARIABLE, spo2);
+    if (objectTemp > 25.0 && objectTemp < 45.0) data.addValue(UBIDOTS_TEMP_VARIABLE, objectTemp);
+    
+    auto results = cloudBroker.sendData(data);
+    
+    bool anySuccess = false;
+    for (const auto& result : results) {
+        if (result.status == CLOUD_SUCCESS) {
+            anySuccess = true;
+            Serial.println("[Cloud] " + result.providerName + ": Upload successful");
         } else {
-            Serial.println("Medical Record: Tidak ada data valid untuk dikirim");
-            http.end();
+            Serial.println("[Cloud] " + result.providerName + ": Upload failed - " + result.message);
         }
-
-        delay(100);
-        display.updateMedicalRecordData(edaValue, stressLevel, heartRate, spo2,
-                                      objectTemp, false);
     }
+    
+    if (anySuccess) {
+        display.updateStatus("Medical Record uploaded");
+        lastUbidotsMillis = millis();
+    } else {
+        display.updateStatus("Upload failed");
+    }
+    
+    delay(100);
+    display.updateMedicalRecordData(edaValue, stressLevel, heartRate, spo2, objectTemp, false);
 }
 
-void sendECGToUbidots(int ecgHeartRate,
-                     const String &token, const String &deviceLabel) {
+void sendECGToCloud(int ecgHeartRate) {
+    if (!cloudBroker.isReady()) {
+        Serial.println("[Cloud] CloudBroker not ready");
+        return;
+    }
+    
     if (ecgHeartRate < 30 || ecgHeartRate > 250) {
+        Serial.println("[Cloud] ECG: Invalid heart rate");
         return;
     }
     
-    if (WiFi.status() != WL_CONNECTED) {
-        display.updateStatus("WiFi Putus! Data ECG tidak dikirim.");
-        return;
+    if (millis() - lastUbidotsMillis < UBIDOTS_MIN_INTERVAL_MS) {
+        return; // Rate limited
     }
     
-    if (millis() - lastUbidotsMillis > UBIDOTS_MIN_INTERVAL_MS) {
-        display.updateStatus("Mengirim data ECG...");
-
-        HTTPClient http;
-        String url = "https://" + String(UBIDOTS_SERVER) + "/api/v1.6/devices/" + deviceLabel;
-        
-        http.begin(url);
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("X-Auth-Token", token);
-        
-        String payload = "{";
-        payload += "\"" + String(UBIDOTS_ECG_VARIABLE) + "_heart_rate\": " + String(ecgHeartRate);
-        payload += "}";
-        
-        int code = http.POST(payload);
-        
-        if (code == 200 || code == 201) {
-            display.updateStatus("ECG HR uploaded (Code: " + String(code) + ")");
-            Serial.println("Data ECG Heart Rate berhasil dikirim ke Ubidots");
+    display.updateStatus("Mengirim data ECG...");
+    
+    SensorData data;
+    data.addValue("ecg_heart_rate", ecgHeartRate);
+    
+    auto results = cloudBroker.sendData(data);
+    
+    bool anySuccess = false;
+    for (const auto& result : results) {
+        if (result.status == CLOUD_SUCCESS) {
+            anySuccess = true;
+            Serial.println("[Cloud] " + result.providerName + ": ECG uploaded");
         } else {
-            display.updateStatus("Upload ECG HR Gagal! Code: " + String(code));
-            Serial.printf("Error mengirim ECG Heart Rate ke Ubidots: %d\n", code);
+            Serial.println("[Cloud] " + result.providerName + ": ECG failed - " + result.message);
         }
-        
-        http.end();
-        lastUbidotsMillis = millis();
-
-        delay(100);
     }
+    
+    if (anySuccess) {
+        display.updateStatus("ECG HR uploaded");
+        lastUbidotsMillis = millis();
+    } else {
+        display.updateStatus("ECG upload failed");
+    }
+    
+    delay(100);
 }
 
-void sendBloodPressureToUbidots(int systolic, int diastolic, int heartRate,
-                               const String &token, const String &deviceLabel) {
+void sendBloodPressureToCloud(int systolic, int diastolic, int heartRate) {
+    if (!cloudBroker.isReady()) {
+        Serial.println("[Cloud] CloudBroker not ready");
+        return;
+    }
+    
     if (systolic <= 0 || diastolic <= 0 || systolic < diastolic) {
+        Serial.println("[Cloud] BP: Invalid data");
         return;
     }
     
-    if (WiFi.status() != WL_CONNECTED) {
-        display.updateStatus("WiFi Putus! Data tidak dikirim.");
-        return;
+    if (millis() - lastUbidotsMillis < UBIDOTS_MIN_INTERVAL_MS) {
+        return; // Rate limited
     }
     
-    if (millis() - lastUbidotsMillis > UBIDOTS_MIN_INTERVAL_MS) {
-        display.updateBloodPressureData(systolic, diastolic, heartRate, true);
-
-        HTTPClient http;
-        String url = "https://" + String(UBIDOTS_SERVER) + "/api/v1.6/devices/" + deviceLabel;
-        
-        http.begin(url);
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("X-Auth-Token", token);
-        
-        String payload = "{";
-        payload += "\"" + String(UBIDOTS_BP_SYSTOLIC_VARIABLE) + "\": " + String(systolic) + ",";
-        payload += "\"" + String(UBIDOTS_BP_DIASTOLIC_VARIABLE) + "\": " + String(diastolic) + ",";
-        payload += "\"" + String(UBIDOTS_BP_HR_VARIABLE) + "\": " + String(heartRate);
-        payload += "}";
-        
-        int code = http.POST(payload);
-        
-        if (code == 200 || code == 201) {
-            display.updateStatus("Blood Pressure uploaded (Code: " + String(code) + ")");
-            Serial.println("Data Blood Pressure berhasil dikirim ke Ubidots");
+    display.updateBloodPressureData(systolic, diastolic, heartRate, true);
+    
+    SensorData data;
+    data.addValue(UBIDOTS_BP_SYSTOLIC_VARIABLE, systolic);
+    data.addValue(UBIDOTS_BP_DIASTOLIC_VARIABLE, diastolic);
+    data.addValue(UBIDOTS_BP_HR_VARIABLE, heartRate);
+    
+    auto results = cloudBroker.sendData(data);
+    
+    bool anySuccess = false;
+    for (const auto& result : results) {
+        if (result.status == CLOUD_SUCCESS) {
+            anySuccess = true;
+            Serial.println("[Cloud] " + result.providerName + ": BP uploaded");
         } else {
-            display.updateStatus("Upload Blood Pressure Gagal! Code: " + String(code));
-            Serial.printf("Error mengirim Blood Pressure ke Ubidots: %d\n", code);
+            Serial.println("[Cloud] " + result.providerName + ": BP failed - " + result.message);
         }
-        
-        http.end();
-        lastUbidotsMillis = millis();
-
-        delay(100);
-        display.updateBloodPressureData(systolic, diastolic, heartRate, false);
     }
+    
+    if (anySuccess) {
+        display.updateStatus("Blood Pressure uploaded");
+        lastUbidotsMillis = millis();
+    } else {
+        display.updateStatus("BP upload failed");
+    }
+    
+    delay(100);
+    display.updateBloodPressureData(systolic, diastolic, heartRate, false);
 }
 
-void sendBodyPositionSnoreToUbidots(int position, int snoreAmplitude,
-                                   const String &token, const String &deviceLabel) {
+void sendBodyPositionSnoreToCloud(int position, int snoreAmplitude) {
+    if (!cloudBroker.isReady()) {
+        Serial.println("[Cloud] CloudBroker not ready");
+        return;
+    }
+    
     if (position == 0 && snoreAmplitude == 0) {
+        Serial.println("[Cloud] Body Position: No data");
         return;
     }
     
-    if (WiFi.status() != WL_CONNECTED) {
-        display.updateStatus("WiFi Putus! Data tidak dikirim.");
-        return;
+    if (millis() - lastUbidotsMillis < UBIDOTS_MIN_INTERVAL_MS) {
+        return; // Rate limited
     }
     
-    if (millis() - lastUbidotsMillis > UBIDOTS_MIN_INTERVAL_MS) {
-        display.updateStatus("Mengirim data Body Position & Snore...");
-
-        HTTPClient http;
-        String url = "https://" + String(UBIDOTS_SERVER) + "/api/v1.6/devices/" + deviceLabel;
-        
-        http.begin(url);
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("X-Auth-Token", token);
-        
-        String payload = "{";
-        payload += "\"" + String(UBIDOTS_POSITION_VARIABLE) + "\": " + String(position) + ",";
-        payload += "\"" + String(UBIDOTS_SNORE_VARIABLE) + "\": " + String(snoreAmplitude);
-        payload += "}";
-        
-        int code = http.POST(payload);
-        
-        if (code == 200 || code == 201) {
-            display.updateStatus("Body Position & Snore uploaded (Code: " + String(code) + ")");
-            Serial.println("Data Body Position & Snore berhasil dikirim ke Ubidots");
+    display.updateStatus("Mengirim data Body Position & Snore...");
+    
+    SensorData data;
+    data.addValue(UBIDOTS_POSITION_VARIABLE, position);
+    data.addValue(UBIDOTS_SNORE_VARIABLE, snoreAmplitude);
+    
+    auto results = cloudBroker.sendData(data);
+    
+    bool anySuccess = false;
+    for (const auto& result : results) {
+        if (result.status == CLOUD_SUCCESS) {
+            anySuccess = true;
+            Serial.println("[Cloud] " + result.providerName + ": Body Position uploaded");
         } else {
-            display.updateStatus("Upload Body Position & Snore Gagal! Code: " + String(code));
-            Serial.printf("Error mengirim Body Position & Snore ke Ubidots: %d\n", code);
+            Serial.println("[Cloud] " + result.providerName + ": Body Position failed - " + result.message);
         }
-        
-        http.end();
+    }
+    
+    if (anySuccess) {
+        display.updateStatus("Body Position & Snore uploaded");
         lastUbidotsMillis = millis();
+    } else {
+        display.updateStatus("Body Position upload failed");
     }
 }
 
-void sendEMGToUbidots(float emgAmplitude_mV, const String &token, const String &deviceLabel) {
+void sendEMGToCloud(float emgAmplitude_mV) {
+    if (!cloudBroker.isReady()) {
+        Serial.println("[Cloud] CloudBroker not ready");
+        return;
+    }
+    
     if (emgAmplitude_mV < 10.0f) {
+        Serial.println("[Cloud] EMG: Amplitude too low");
         return;
     }
     
-    if (WiFi.status() != WL_CONNECTED) {
-        display.updateStatus("WiFi Putus! Data EMG tidak dikirim.");
-        return;
+    if (millis() - lastUbidotsMillis < UBIDOTS_MIN_INTERVAL_MS) {
+        return; // Rate limited
     }
     
-    if (millis() - lastUbidotsMillis > UBIDOTS_MIN_INTERVAL_MS) {
-        display.updateStatus("Mengirim data EMG...");
-
-        HTTPClient http;
-        String url = "https://" + String(UBIDOTS_SERVER) + "/api/v1.6/devices/" + deviceLabel;
-        
-        http.begin(url);
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("X-Auth-Token", token);
-        
-        String payload = "{";
-        payload += "\"" + String(UBIDOTS_EMG_VARIABLE) + "\": " + String(emgAmplitude_mV, 2);
-        payload += "}";
-        
-        int code = http.POST(payload);
-        
-        if (code == 200 || code == 201) {
-            display.updateStatus("EMG Amplitude uploaded (Code: " + String(code) + ")");
-            Serial.printf("Data EMG Amplitude (%.2f mV) berhasil dikirim ke Ubidots\n", emgAmplitude_mV);
+    display.updateStatus("Mengirim data EMG...");
+    
+    SensorData data;
+    data.addValue(UBIDOTS_EMG_VARIABLE, emgAmplitude_mV);
+    
+    auto results = cloudBroker.sendData(data);
+    
+    bool anySuccess = false;
+    for (const auto& result : results) {
+        if (result.status == CLOUD_SUCCESS) {
+            anySuccess = true;
+            Serial.printf("[Cloud] %s: EMG (%.2f mV) uploaded\n", result.providerName.c_str(), emgAmplitude_mV);
         } else {
-            display.updateStatus("Upload EMG Amplitude Gagal! Code: " + String(code));
-            Serial.printf("Error mengirim EMG Amplitude ke Ubidots: %d\n", code);
+            Serial.println("[Cloud] " + result.providerName + ": EMG failed - " + result.message);
         }
-        
-        http.end();
+    }
+    
+    if (anySuccess) {
+        display.updateStatus("EMG Amplitude uploaded");
         lastUbidotsMillis = millis();
+    } else {
+        display.updateStatus("EMG upload failed");
     }
 }
 
@@ -1874,6 +1845,133 @@ void handleSerialCommands() {
         Serial.println("Test selesai.");
         refreshCurrentScreen();
     }
+    else if (cmd == "testcloud") {
+        Serial.println("\n=== TEST MULTI-CLOUD CONNECTION ===");
+        
+        if (!cloudBroker.isReady()) {
+            Serial.println("✗ CloudBroker not ready");
+            return;
+        }
+        
+        bool result = cloudBroker.testConnection();
+        
+        Serial.println("\n--- Results ---");
+        Serial.println("Overall: " + String(result ? "SUCCESS" : "FAILED"));
+        Serial.println("Ubidots: " + cloudBroker.getUbidotsStatus());
+        Serial.println("ThingsBoard: " + cloudBroker.getThingsBoardStatus());
+    }
+    else if (cmd == "cloudstatus") {
+        Serial.println("\n=== CLOUD BROKER STATUS ===");
+        Serial.print("Provider Type: ");
+        switch(cloudBroker.getProviderType()) {
+            case PROVIDER_NONE: Serial.println("0 (None)"); break;
+            case PROVIDER_UBIDOTS: Serial.println("1 (Ubidots only)"); break;
+            case PROVIDER_THINGSBOARD: Serial.println("2 (ThingsBoard only)"); break;
+            case PROVIDER_BOTH: Serial.println("3 (Both platforms)"); break;
+        }
+        Serial.println("Status: " + cloudBroker.getStatusMessage());
+        Serial.println("Ubidots: " + cloudBroker.getUbidotsStatus());
+        Serial.println("ThingsBoard: " + cloudBroker.getThingsBoardStatus());
+    }
+    else if (cmd == "addcloud") {
+        Serial.println("\n=== TAMBAH USER DENGAN MULTI-CLOUD ===");
+        Serial.println("(Kosongkan untuk batal)");
+        
+        Serial.print("Nama User: ");
+        String name = readLineFromSerial(30000);
+        if (name.length() == 0) {
+            Serial.println("✗ Dibatalkan.");
+            return;
+        }
+        
+        Serial.println("\nCloud Provider:");
+        Serial.println("1 - Ubidots only");
+        Serial.println("2 - ThingsBoard only");
+        Serial.println("3 - Both (Ubidots + ThingsBoard)");
+        Serial.print("Pilih (1-3): ");
+        String provStr = readLineFromSerial(15000);
+        int cloudProvider = provStr.toInt();
+        
+        if (cloudProvider < 1 || cloudProvider > 3) {
+            Serial.println("✗ Pilihan tidak valid!");
+            return;
+        }
+        
+        String ubidotsToken = "";
+        String ubidotsLabel = "";
+        String thingsboardToken = "";
+        String thingsboardLabel = "";
+        
+        if (cloudProvider == 1 || cloudProvider == 3) {
+            Serial.print("Ubidots Token: ");
+            ubidotsToken = readLineFromSerial(30000);
+            if (ubidotsToken.length() == 0) {
+                Serial.println("✗ Token tidak boleh kosong!");
+                return;
+            }
+            Serial.print("Ubidots Device Label: ");
+            ubidotsLabel = readLineFromSerial(30000);
+            if (ubidotsLabel.length() == 0) {
+                Serial.println("✗ Device label tidak boleh kosong!");
+                return;
+            }
+        }
+        
+        if (cloudProvider == 2 || cloudProvider == 3) {
+            Serial.print("ThingsBoard Token: ");
+            thingsboardToken = readLineFromSerial(30000);
+            if (thingsboardToken.length() == 0) {
+                Serial.println("✗ Token tidak boleh kosong!");
+                return;
+            }
+            Serial.print("ThingsBoard Device Label (optional): ");
+            thingsboardLabel = readLineFromSerial(30000);
+        }
+        
+        Serial.println("\n=== KONFIRMASI ===");
+        Serial.println("Nama: " + name);
+        Serial.print("Cloud Provider: ");
+        switch(cloudProvider) {
+            case 1: Serial.println("Ubidots only"); break;
+            case 2: Serial.println("ThingsBoard only"); break;
+            case 3: Serial.println("Both platforms"); break;
+        }
+        if (cloudProvider == 1 || cloudProvider == 3) {
+            Serial.println("Ubidots Token: " + ubidotsToken.substring(0, min(10, (int)ubidotsToken.length())) + "...");
+            Serial.println("Ubidots Label: " + ubidotsLabel);
+        }
+        if (cloudProvider == 2 || cloudProvider == 3) {
+            Serial.println("ThingsBoard Token: " + thingsboardToken.substring(0, min(10, (int)thingsboardToken.length())) + "...");
+            if (thingsboardLabel.length() > 0) {
+                Serial.println("ThingsBoard Label: " + thingsboardLabel);
+            }
+        }
+        Serial.print("Tambahkan user? (y/n): ");
+        
+        String confirm = readLineFromSerial(10000);
+        if (confirm.equalsIgnoreCase("y")) {
+            deviceMgr.addDeviceWithCloud(name, 
+                                        ubidotsToken, ubidotsLabel,
+                                        thingsboardToken, thingsboardLabel,
+                                        cloudProvider);
+            Serial.println("✓ User dengan multi-cloud berhasil ditambahkan!");
+            
+            if (deviceMgr.devices.size() == 1) {
+                selectedIndex = 0;
+                
+                cloudBroker.begin(
+                    (CloudProviderType)cloudProvider,
+                    ubidotsToken, ubidotsLabel,
+                    thingsboardToken, thingsboardLabel
+                );
+                Serial.println("CloudBroker initialized for new user");
+            }
+            
+            refreshCurrentScreen();
+        } else {
+            Serial.println("✗ Dibatalkan.");
+        }
+    }
     else if (cmd.length() > 0) {
         Serial.printf("Unknown command: %s\n", cmd.c_str());
         Serial.println("Type 'menu' for available commands.");
@@ -1931,6 +2029,24 @@ void setup() {
     
     Serial.println("\nInitializing device manager...");
     deviceMgr.begin();
+    
+    // Initialize CloudBroker after deviceMgr is ready
+    if (!deviceMgr.isEmpty()) {
+        Device& currentDevice = deviceMgr.devices[selectedIndex];
+        CloudProviderType providerType = (CloudProviderType)currentDevice.cloudProvider;
+        
+        cloudBroker.begin(
+            providerType,
+            currentDevice.ubidotsToken,
+            currentDevice.ubidotsDeviceLabel,
+            currentDevice.thingsboardToken,
+            currentDevice.thingsboardDeviceLabel
+        );
+        
+        Serial.println("[CloudBroker] Initialized successfully");
+    } else {
+        Serial.println("[CloudBroker] No users configured, skipping initialization");
+    }
     
     Serial.println("Initializing WiFi manager...");
     wifiMgr.begin();
@@ -2584,10 +2700,7 @@ void loop() {
             }
             
             if (!deviceMgr.isEmpty()) {
-                sendMedicalRecordToUbidots(edaValue, lastHeartRate, lastSpO2,
-                                        lastObjectTemp,
-                                        deviceMgr.devices[selectedIndex].ubidotsToken,
-                                        deviceMgr.devices[selectedIndex].ubidotsDeviceLabel);
+                sendMedicalRecordToCloud(edaValue, lastHeartRate, lastSpO2, lastObjectTemp);
             }
             
             delay(100);
@@ -2607,9 +2720,7 @@ void loop() {
                                 lastSystolic, lastDiastolic, lastBPHeartRate);
                     
                     if (!deviceMgr.isEmpty()) {
-                        sendBloodPressureToUbidots(lastSystolic, lastDiastolic, lastBPHeartRate,
-                                                deviceMgr.devices[selectedIndex].ubidotsToken,
-                                                deviceMgr.devices[selectedIndex].ubidotsDeviceLabel);
+                        sendBloodPressureToCloud(lastSystolic, lastDiastolic, lastBPHeartRate);
                     }
                 }
                 
@@ -2642,9 +2753,7 @@ void loop() {
             }
             
             if (ecgHeartRate > 0 && !deviceMgr.isEmpty()) {
-                sendECGToUbidots(ecgHeartRate,
-                                deviceMgr.devices[selectedIndex].ubidotsToken,
-                                deviceMgr.devices[selectedIndex].ubidotsDeviceLabel);
+                sendECGToCloud(ecgHeartRate);
             } else if (ecgHeartRate == 0) {
                 display.updateStatus("Tunggu detak jantung...");
             }
@@ -2677,9 +2786,7 @@ void loop() {
             }
             
             if (!deviceMgr.isEmpty() && lastEMGAmplitude_mV >= 10.0f) {
-                sendEMGToUbidots(lastEMGAmplitude_mV,
-                                deviceMgr.devices[selectedIndex].ubidotsToken,
-                                deviceMgr.devices[selectedIndex].ubidotsDeviceLabel);
+                sendEMGToCloud(lastEMGAmplitude_mV);
             }
             
             if (!emgSensor.isCalibrated()) {
@@ -2710,9 +2817,7 @@ void loop() {
             }
             
             if (!deviceMgr.isEmpty() && (lastBodyPosition > 0 || lastSnoreAmplitude > 0)) {
-                sendBodyPositionSnoreToUbidots(lastBodyPosition, lastSnoreAmplitude,
-                                            deviceMgr.devices[selectedIndex].ubidotsToken,
-                                            deviceMgr.devices[selectedIndex].ubidotsDeviceLabel);
+                sendBodyPositionSnoreToCloud(lastBodyPosition, lastSnoreAmplitude);
             }
             
             delay(100);
