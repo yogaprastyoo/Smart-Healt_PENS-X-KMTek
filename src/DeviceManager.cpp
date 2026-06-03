@@ -59,6 +59,12 @@ void DeviceManager::loadConfig() {
         d.name = obj["name"].as<String>();
         d.ubidotsToken = obj["ubidotsToken"].as<String>();
         d.ubidotsDeviceLabel = obj["ubidotsDeviceLabel"].as<String>();
+        
+        // Load ThingsBoard credentials (backward compatible)
+        d.thingsboardToken = obj["thingsboardToken"] | "";
+        d.thingsboardDeviceLabel = obj["thingsboardDeviceLabel"] | "";
+        d.cloudProvider = obj["cloudProvider"] | 1; // Default to Ubidots for old configs
+        
         devices.push_back(d);
     }
 }
@@ -71,6 +77,9 @@ void DeviceManager::saveConfig() {
         o["name"] = d.name;
         o["ubidotsToken"] = d.ubidotsToken;
         o["ubidotsDeviceLabel"] = d.ubidotsDeviceLabel;
+        o["thingsboardToken"] = d.thingsboardToken;
+        o["thingsboardDeviceLabel"] = d.thingsboardDeviceLabel;
+        o["cloudProvider"] = d.cloudProvider;
     }
 
     File f = SPIFFS.open(CONFIG_PATH, FILE_WRITE);
@@ -83,7 +92,16 @@ void DeviceManager::saveConfig() {
 }
 
 void DeviceManager::addDevice(String name, String token, String deviceLabel) {
-    devices.push_back({name, token, deviceLabel});
+    // Backward compatible: add device with Ubidots only
+    Device d;
+    d.name = name;
+    d.ubidotsToken = token;
+    d.ubidotsDeviceLabel = deviceLabel;
+    d.thingsboardToken = "";
+    d.thingsboardDeviceLabel = "";
+    d.cloudProvider = 1; // Ubidots only
+    
+    devices.push_back(d);
     saveConfig();
 }
 
@@ -136,4 +154,47 @@ void DeviceManager::printDevices() {
 
 bool DeviceManager::isEmpty() {
     return devices.empty();
+}
+// New method with full multi-cloud support
+void DeviceManager::addDeviceWithCloud(String name, 
+                                      String ubidotsToken, String ubidotsLabel,
+                                      String thingsboardToken, String thingsboardLabel,
+                                      int cloudProvider) {
+    Device d;
+    d.name = name;
+    d.ubidotsToken = ubidotsToken;
+    d.ubidotsDeviceLabel = ubidotsLabel;
+    d.thingsboardToken = thingsboardToken;
+    d.thingsboardDeviceLabel = thingsboardLabel;
+    d.cloudProvider = cloudProvider;
+    
+    devices.push_back(d);
+    saveConfig();
+    
+    Serial.println("[DeviceManager] Device added with multi-cloud support:");
+    Serial.println("  Name: " + name);
+    Serial.println("  Cloud Provider: " + String(cloudProvider));
+}
+
+// New edit method with full multi-cloud support
+void DeviceManager::editDeviceWithCloud(int index, String newName,
+                                       String ubidotsToken, String ubidotsLabel,
+                                       String thingsboardToken, String thingsboardLabel,
+                                       int cloudProvider) {
+    if (index >= 0 && index < devices.size()) {
+        devices[index].name = newName;
+        devices[index].ubidotsToken = ubidotsToken;
+        devices[index].ubidotsDeviceLabel = ubidotsLabel;
+        devices[index].thingsboardToken = thingsboardToken;
+        devices[index].thingsboardDeviceLabel = thingsboardLabel;
+        devices[index].cloudProvider = cloudProvider;
+        
+        saveConfig();
+        
+        Serial.printf("[DeviceManager] User %d updated with multi-cloud support!\n", index);
+        Serial.println("  Name: " + newName);
+        Serial.println("  Cloud Provider: " + String(cloudProvider));
+    } else {
+        Serial.println("[DeviceManager] Index tidak valid!");
+    }
 }

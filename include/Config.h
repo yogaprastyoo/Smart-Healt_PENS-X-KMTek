@@ -55,6 +55,12 @@
 #define EMG_MAX_MV 3000.0f      
 #define UBIDOTS_MIN_INTERVAL_MS 15000UL
 
+// --- KONFIGURASI THINGSBOARD ---
+#define THINGSBOARD_SERVER "demo.thingsboard.io"  // Default demo server
+#define THINGSBOARD_PORT 80                        // HTTP port (443 untuk HTTPS)
+#define THINGSBOARD_TOKEN ""                       // Access token, akan diisi per device
+#define THINGSBOARD_DEVICE_LABEL ""                // Optional device label
+
 // --- KONFIGURASI NVS (MEMORY) ---
 #define PREF_NAMESPACE "shp"
 
